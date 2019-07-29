@@ -665,7 +665,10 @@ class MiniGridEnv(gym.Env):
         max_steps=100,
         see_through_walls=False,
         seed=1337,
-        agent_view_size=7
+        agent_view_size=7,
+        agent_full_screen_view=False,
+        pad_view=False,
+        variable_view=False
     ):
         # Can't set both grid_size and width/height
         if grid_size:
@@ -679,17 +682,38 @@ class MiniGridEnv(gym.Env):
         # Actions are discrete integer values
         self.action_space = spaces.Discrete(len(self.actions))
 
+        # If variable view is enabled the agent can choose to look
+        # at a different section of the screen on each iteration
+        self.variable_view = variable_view
+
         # Number of cells (width and height) in the agent view
         self.agent_view_size = agent_view_size
 
+        # Weather or not we pad the agent's view to be fully egocentric
+        self.pad_view = pad_view
+
+        # Weather the agent sees the entire screen or not
+        self.agent_full_screen_view = agent_full_screen_view
+        if self.agent_full_screen_view:
+            self.agent_view_size = max(width, height)
+
         # Observations are dictionaries containing an
         # encoding of the grid and a textual 'mission' string
-        self.observation_space = spaces.Box(
-            low=0,
-            high=255,
-            shape=(self.agent_view_size, self.agent_view_size, 3),
-            dtype='uint8'
-        )
+        if self.agent_full_screen_view:
+            self.observation_space = spaces.Box(
+                low=0,
+                high=255,
+                shape=(width, height, 3),
+                dtype='uint8'
+            )
+        else:
+            self.observation_space = spaces.Box(
+                low=0,
+                high=255,
+                shape=(self.agent_view_size, self.agent_view_size, 3),
+                dtype='uint8'
+            )
+
         self.observation_space = spaces.Dict({
             'image': self.observation_space
         })
@@ -744,7 +768,10 @@ class MiniGridEnv(gym.Env):
         self.step_count = 0
 
         # Return first observation
-        obs = self.gen_obs()
+        if self.variable_view:
+            obs = self.gen_obs(gaze=[1,1])
+        else:
+            obs = self.gen_obs()
         return obs
 
     def seed(self, seed=1337):
@@ -1029,6 +1056,10 @@ class MiniGridEnv(gym.Env):
         Note: the bottom extent indices are not included in the set
         """
 
+        # If agent sees the entire screen return span of screen
+        if self.agent_full_screen_view:
+            return 0, 0, self.width-1, self.height-1
+
         # Facing right
         if self.agent_dir == 0:
             topX = self.agent_pos[0]
@@ -1057,6 +1088,10 @@ class MiniGridEnv(gym.Env):
         """
         Check if a grid position belongs to the agent's field of view, and returns the corresponding coordinates
         """
+
+        # If the agent sees the whole screen return the original coordinates
+        if self.agent_full_screen_view:
+            return x, y
 
         vx, vy = self.get_view_coords(x, y)
 
@@ -1091,6 +1126,10 @@ class MiniGridEnv(gym.Env):
 
     def step(self, action):
         self.step_count += 1
+
+        if self.variable_view:
+            gaze = action[1:]
+            action = action[0]
 
         reward = 0
         done = False
@@ -1151,9 +1190,13 @@ class MiniGridEnv(gym.Env):
         if self.step_count >= self.max_steps:
             done = True
 
-        obs = self.gen_obs()
+        if self.variable_view:
+            obs = self.gen_obs(gaze=gaze)
+        else:
+            obs = self.gen_obs()
 
         return obs, reward, done, {}
+
 
     def gen_obs_grid(self):
         """
@@ -1166,8 +1209,14 @@ class MiniGridEnv(gym.Env):
 
         grid = self.grid.slice(topX, topY, self.agent_view_size, self.agent_view_size)
 
-        for i in range(self.agent_dir + 1):
-            grid = grid.rotate_left()
+        # If we are padding the view we will perform the rotation afterwards
+        if not ((self.agent_full_screen_view and self.variable_view) and self.pad_view):
+            for i in range(self.agent_dir + 1):
+                grid = grid.rotate_left()
+
+        # If the agent can see the whole grid return the whole grid
+        if self.agent_full_screen_view or self.variable_view:
+            return self.grid.slice(0, 0, self.width, self.height), None
 
         # Process occluders and visibility
         # Note that this incurs some performance cost
@@ -1187,7 +1236,7 @@ class MiniGridEnv(gym.Env):
 
         return grid, vis_mask
 
-    def gen_obs(self):
+    def gen_obs(self, gaze=None):
         """
         Generate the agent's view (partially observable, low-resolution encoding)
         """
@@ -1196,6 +1245,53 @@ class MiniGridEnv(gym.Env):
 
         # Encode the partially observable view into a numpy array
         image = grid.encode(vis_mask)
+
+        if self.pad_view:
+            padded_image = np.full((2*self.width-1, 2*self.height-1, 3), [0,5,0])
+            # Transpose image
+            image = np.swapaxes(image, 0, 1)
+            if self.agent_full_screen_view or self.variable_view:
+                # Center the agent on the view
+                view_start_x = self.width - 1 - self.agent_pos[0]
+                view_start_y = self.height - 1 - self.agent_pos[1]
+                padded_image[view_start_y:view_start_y + self.height,
+                             view_start_x:view_start_x + self.width,] = image
+                # Rotate the view so the agent is always looking up
+                image = np.rot90(padded_image, self.agent_dir + 1)
+                if self.variable_view:
+                    padded_image = np.full((2 * self.width - 1, 2 * self.height - 1, 3), [0, 5, 0])
+
+                    # Ensure that the desired gaze is withing the input view
+                    if gaze[0] > 18:
+                        gaze_start_x = 0
+                    elif gaze[0] < -11:
+                        gaze_start_x = 31
+                    else:
+                        gaze_start_x = 18 - gaze[0]
+
+                    if gaze[1] > 18:
+                        gaze_start_y = 0
+                    elif gaze[1] < -11:
+                        gaze_start_y = 31
+                    else:
+                        gaze_start_y = 18 - gaze[1]
+
+                    padded_image[gaze_start_y:gaze_start_y+self.agent_view_size,
+                                 gaze_start_x:gaze_start_x+self.agent_view_size] = \
+                           image[gaze_start_y:gaze_start_y+self.agent_view_size,
+                                 gaze_start_x:gaze_start_x+self.agent_view_size]
+                    image = padded_image
+            else:
+                view_start_x = self.width - self.agent_view_size//2
+                view_start_y = self.height - self.agent_view_size//2
+                padded_image[view_start_y:view_start_y + self.agent_view_size,
+                             view_start_x:view_start_x + self.agent_view_size] = image
+                image = padded_image
+
+            grid = np.tile(np.linspace(-1, 1, 37), (37,1)).reshape((37,37,1))
+            image = np.append(image, grid, axis=2)
+            image = np.append(image, np.rot90(grid), axis=2)
+
 
         assert hasattr(self, 'mission'), "environments must define a textual mission string"
 
@@ -1218,10 +1314,17 @@ class MiniGridEnv(gym.Env):
 
         if self.obs_render == None:
             from gym_minigrid.rendering import Renderer
-            self.obs_render = Renderer(
-                self.agent_view_size * tile_pixels,
-                self.agent_view_size * tile_pixels
-            )
+
+            if self.agent_full_screen_view:
+                self.obs_render = Renderer(
+                    self.width * tile_pixels,
+                    self.height * tile_pixels
+                )
+            else:
+                self.obs_render = Renderer(
+                    self.agent_view_size * tile_pixels,
+                    self.agent_view_size * tile_pixels
+                )
 
         r = self.obs_render
 
@@ -1236,11 +1339,15 @@ class MiniGridEnv(gym.Env):
         ratio = tile_pixels / CELL_PIXELS
         r.push()
         r.scale(ratio, ratio)
-        r.translate(
-            CELL_PIXELS * (0.5 + self.agent_view_size // 2),
-            CELL_PIXELS * (self.agent_view_size - 0.5)
-        )
-        r.rotate(3 * 90)
+
+        # Only translate and rotate the view if the agent can not see the whole screen
+        if not self.agent_full_screen_view:
+            r.translate(
+                CELL_PIXELS * (0.5 + self.agent_view_size // 2),
+                CELL_PIXELS * (self.agent_view_size - 0.5)
+            )
+            r.rotate(3 * 90)
+
         r.setLineColor(255, 0, 0)
         r.setColor(255, 0, 0)
         r.drawPolygon([
@@ -1306,26 +1413,42 @@ class MiniGridEnv(gym.Env):
         f_vec = self.dir_vec
         r_vec = self.right_vec
         top_left = self.agent_pos + f_vec * (self.agent_view_size-1) - r_vec * (self.agent_view_size // 2)
+        # If the agent sees the entire screen it's top left corner is the top left of the screen
+        if self.agent_full_screen_view:
+            top_left = 0
 
-        # For each cell in the visibility mask
+
         if highlight:
-            for vis_j in range(0, self.agent_view_size):
-                for vis_i in range(0, self.agent_view_size):
-                    # If this cell is not visible, don't highlight it
-                    if not vis_mask[vis_i, vis_j]:
-                        continue
+            # If the agent sees the whole screen highlight the entire screen
+            if self.agent_full_screen_view:
+                # Highlight the cell
+                r.fillRect(
+                    0,
+                    0,
+                    self.width * CELL_PIXELS,
+                    self.height * CELL_PIXELS,
+                    255, 255, 255, 75
+                )
+            # If the agent does not see the full screen highlight what he sees
+            else:
+                # For each cell in the visibility mask
+                for vis_j in range(0, self.agent_view_size):
+                    for vis_i in range(0, self.agent_view_size):
+                        # If this cell is not visible, don't highlight it
+                        if not vis_mask[vis_i, vis_j]:
+                            continue
 
-                    # Compute the world coordinates of this cell
-                    abs_i, abs_j = top_left - (f_vec * vis_j) + (r_vec * vis_i)
+                        # Compute the world coordinates of this cell
+                        abs_i, abs_j = top_left - (f_vec * vis_j) + (r_vec * vis_i)
 
-                    # Highlight the cell
-                    r.fillRect(
-                        abs_i * CELL_PIXELS,
-                        abs_j * CELL_PIXELS,
-                        CELL_PIXELS,
-                        CELL_PIXELS,
-                        255, 255, 255, 75
-                    )
+                        # Highlight the cell
+                        r.fillRect(
+                            abs_i * CELL_PIXELS,
+                            abs_j * CELL_PIXELS,
+                            CELL_PIXELS,
+                            CELL_PIXELS,
+                            255, 255, 255, 75
+                        )
 
         r.endFrame()
 

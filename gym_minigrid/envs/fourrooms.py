@@ -11,10 +11,21 @@ class FourRoomsEnv(MiniGridEnv):
     Can specify agent and goal position, if not it set at random.
     """
 
-    def __init__(self, agent_pos=None, goal_pos=None):
+    def __init__(self, agent_pos=None,
+                 goal_pos=None,
+                 agent_full_screen_view=False,
+                 pad_view=False,
+                 see_through_walls=False,
+                 max_steps=100,
+                 variable_view=False):
         self._agent_default_pos = agent_pos
         self._goal_default_pos = goal_pos
-        super().__init__(grid_size=19, max_steps=100)
+        super().__init__(grid_size=19,
+                         max_steps=max_steps,
+                         agent_full_screen_view=agent_full_screen_view,
+                         pad_view=pad_view,
+                         see_through_walls=see_through_walls,
+                         variable_view=variable_view)
 
     def _gen_grid(self, width, height):
         # Create the grid
@@ -73,7 +84,50 @@ class FourRoomsEnv(MiniGridEnv):
         return obs, reward, done, info
 
 
+class FourRoomsEnvFullView(FourRoomsEnv):
+
+    def __init__(self):
+        super().__init__(
+            agent_full_screen_view=True,
+            pad_view=True,
+            max_steps=200
+        )
+
+class FourRoomsEnvEgoView(FourRoomsEnv):
+
+    def __init__(self):
+        super().__init__(
+            pad_view=True,
+            see_through_walls=True,
+            max_steps=200
+        )
+
+class FourRoomsEnvVariableView(FourRoomsEnv):
+
+    def __init__(self):
+        super().__init__(
+            pad_view=True,
+            see_through_walls=True,
+            max_steps=200,
+            variable_view=True
+        )
+
 register(
     id='MiniGrid-FourRooms-v0',
     entry_point='gym_minigrid.envs:FourRoomsEnv'
+)
+
+register(
+    id='MiniGrid-FourRooms-FullView-v0',
+    entry_point='gym_minigrid.envs:FourRoomsEnvFullView'
+)
+
+register(
+    id='MiniGrid-FourRooms-EgoView-v0',
+    entry_point='gym_minigrid.envs:FourRoomsEnvEgoView'
+)
+
+register(
+    id='MiniGrid-FourRooms-VariableView-v0',
+    entry_point='gym_minigrid.envs:FourRoomsEnvVariableView'
 )
